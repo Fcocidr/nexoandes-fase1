@@ -1,0 +1,7 @@
+# Excepciones justificadas del analisis de seguridad (arquitectura de referencia del docente)
+# HTTP/80 abierto a Internet: el portal debe ser publico segun el diagrama
+AVD-AWS-0107
+# Salida abierta a Internet: necesaria para instalar nginx durante el bootstrap
+AVD-AWS-0104
+# IP publica en la subnet publica: requisito del diagrama (map_public_ip_on_launch = true)
+AVD-AWS-0164
