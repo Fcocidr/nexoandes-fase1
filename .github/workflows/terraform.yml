@@ -1,0 +1,233 @@
+name: terraform-nexoandes-fase1
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/**", ".trivyignore"]
+  push:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/**", ".trivyignore"]
+  workflow_dispatch:
+    inputs:
+      accion:
+        description: "Accion a ejecutar"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-nexoandes-fase1
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.16.6"
+  TF_IN_AUTOMATION: "true"
+  AWS_REGION: us-east-1
+
+defaults:
+  run:
+    working-directory: terraform
+
+jobs:
+  controles:
+    name: Controles previos
+    if: github.event_name != 'workflow_dispatch' || inputs.accion != 'destroy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: "Control 1 - Formato (terraform fmt -check)"
+        run: terraform fmt -check -recursive
+
+      - name: "Inicializacion sin backend"
+        run: terraform init -backend=false -input=false
+
+      - name: "Control 2 - Validacion (terraform validate)"
+        run: terraform validate
+
+      - name: "Control 3 - Prueba IaC con aserciones (terraform test)"
+        run: terraform test
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.53.0
+
+      - name: "Control 4 - Lint y calidad (tflint)"
+        run: |
+          tflint --init
+          tflint --recursive
+
+      - name: "Control 5 - Seguridad IaC (trivy config)"
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$HOME/.local/bin"
+          "$HOME/.local/bin/trivy" config --severity HIGH,CRITICAL --exit-code 1 --ignorefile ../.trivyignore .
+
+  plan:
+    name: Plan
+    needs: controles
+    if: vars.AWS_HABILITADO == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.accion != 'destroy'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: "terraform init (backend remoto S3)"
+        run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: "terraform plan"
+        run: terraform plan -var-file=fase1.tfvars -input=false -out=tfplan
+
+      - name: "Resumen del plan (para revision en el gate)"
+        run: |
+          terraform show -no-color tfplan > plan.txt
+          { echo '### Plan de Terraform'; echo '```'; cat plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: |
+            terraform/tfplan
+            terraform/plan.txt
+          retention-days: 3
+
+  apply:
+    name: Apply (con aprobacion manual)
+    needs: plan
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.accion == 'apply')
+    runs-on: ubuntu-latest
+    environment: aprobacion
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
+
+      - name: "terraform init (backend remoto S3)"
+        run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: "terraform apply (plan aprobado)"
+        run: terraform apply -input=false tfplan
+
+  verificar:
+    name: Verificacion independiente y plan posterior
+    needs: apply
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: "terraform init (backend remoto S3)"
+        run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: "A - Outputs de Terraform"
+        id: tf
+        run: |
+          echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
+          echo "public_ip=$(terraform output -raw public_ip)" >> "$GITHUB_OUTPUT"
+          terraform output
+
+      - name: "B - Consulta independiente a AWS (CLI)"
+        run: |
+          aws ec2 describe-instances \
+            --instance-ids "${{ steps.tf.outputs.instance_id }}" \
+            --query 'Reservations[0].Instances[0].{InstanceId:InstanceId,Estado:State.Name,Tipo:InstanceType,IPPublica:PublicIpAddress,IPPrivada:PrivateIpAddress}' \
+            --output table
+
+      - name: "C - Prueba HTTP al portal"
+        run: |
+          IP="${{ steps.tf.outputs.public_ip }}"
+          ID="${{ steps.tf.outputs.instance_id }}"
+          CODE=""
+          for i in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$IP/" || true)
+            echo "intento $i -> HTTP $CODE"
+            if [ "$CODE" = "200" ]; then break; fi
+            sleep 10
+          done
+          [ "$CODE" = "200" ]
+          echo "health.txt -> $(curl -s --max-time 5 "http://$IP/health.txt")"
+          curl -s --max-time 5 "http://$IP/" | grep -q "$ID"
+          echo "La pagina muestra el mismo Instance ID: $ID"
+
+      - name: "D - Plan posterior (debe indicar 0 cambios)"
+        run: terraform plan -var-file=fase1.tfvars -input=false -detailed-exitcode
+
+  destroy:
+    name: Destroy (con aprobacion manual)
+    if: vars.AWS_HABILITADO == 'true' && github.event_name == 'workflow_dispatch' && inputs.accion == 'destroy'
+    runs-on: ubuntu-latest
+    environment: aprobacion
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: "terraform init (backend remoto S3)"
+        run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: "terraform destroy"
+        run: terraform destroy -auto-approve -input=false -var-file=fase1.tfvars
+
+      - name: "Verificacion independiente de limpieza (AWS CLI)"
+        run: |
+          N=$(grep -E '^student_number' fase1.tfvars | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          INST=$(aws ec2 describe-instances \
+            --filters "Name=tag:StudentNumber,Values=$N" "Name=tag:Project,Values=NexoAndes" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          VPCS=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:StudentNumber,Values=$N" "Name=tag:Project,Values=NexoAndes" \
+            --query 'Vpcs[].VpcId' --output text)
+          echo "Instancias restantes: [$INST]"
+          echo "VPC restantes: [$VPCS]"
+          [ -z "$INST" ] && [ -z "$VPCS" ]
