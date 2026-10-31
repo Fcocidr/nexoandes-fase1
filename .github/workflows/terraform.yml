@@ -73,7 +73,7 @@ jobs:
   plan:
     name: Plan
     needs: controles
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.accion != 'destroy')
+    if: vars.AWS_HABILITADO == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.accion != 'destroy'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -196,7 +196,7 @@ jobs:
 
   destroy:
     name: Destroy (con aprobacion manual)
-    if: github.event_name == 'workflow_dispatch' && inputs.accion == 'destroy'
+    if: vars.AWS_HABILITADO == 'true' && github.event_name == 'workflow_dispatch' && inputs.accion == 'destroy'
     runs-on: ubuntu-latest
     environment: aprobacion
     steps:
