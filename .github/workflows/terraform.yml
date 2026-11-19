@@ -1,4 +1,4 @@
-name: terraform-nexoandes-fase1
+name: terraform-nexoandes-u2
 
 on:
   pull_request:
@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: terraform-nexoandes-fase1
+  group: terraform-nexoandes-u2
   cancel-in-progress: false
 
 env:
@@ -81,6 +81,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -89,16 +90,29 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: "Identidad y destino AWS (gate de contexto)"
+        run: |
+          aws sts get-caller-identity --query 'Arn' --output text
+          aws configure get region || echo "region=$AWS_REGION"
+
       - name: "terraform init (backend remoto S3)"
         run: terraform init -backend-config=backend.hcl -input=false
 
       - name: "terraform plan"
-        run: terraform plan -var-file=fase1.tfvars -input=false -out=tfplan
+        run: terraform plan -var-file=u2.tfvars -input=false -out=tfplan
 
       - name: "Resumen del plan (para revision en el gate)"
         run: |
           terraform show -no-color tfplan > plan.txt
-          { echo '### Plan de Terraform'; echo '```'; cat plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '### Plan de Terraform U2'
+            echo "- Commit: \`${GITHUB_SHA}\` | Ejecucion: \`${GITHUB_RUN_ID}\` | Terraform: \`${TF_VERSION}\`"
+            echo "- Hora UTC del plan: \`$(date -u +%Y-%m-%dT%H:%M:%SZ)\`"
+            echo '#### Variables del plan (u2.tfvars)'
+            echo '```'; cat u2.tfvars; echo '```'
+            echo '#### Plan'
+            echo '```'; cat plan.txt; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -106,7 +120,7 @@ jobs:
           path: |
             terraform/tfplan
             terraform/plan.txt
-          retention-days: 3
+          retention-days: 1
 
   apply:
     name: Apply (con aprobacion manual)
@@ -120,6 +134,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -136,8 +151,57 @@ jobs:
       - name: "terraform init (backend remoto S3)"
         run: terraform init -backend-config=backend.hcl -input=false
 
+      - name: "Registrar inicio del cambio (UTC)"
+        run: |
+          echo "INICIO_CAMBIO_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$GITHUB_ENV"
+          echo "- Inicio del cambio (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: "terraform apply (plan aprobado)"
         run: terraform apply -input=false tfplan
+
+      - name: "Esperar el resultado final del Instance Refresh"
+        run: |
+          ASG="$(terraform output -raw asg_name)"
+          INICIO_EPOCH=$(date -u -d "$INICIO_CAMBIO_UTC" +%s)
+          for i in $(seq 1 120); do
+            R=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$ASG" --max-records 1 --query 'InstanceRefreshes[0]' --output json)
+            if [ "$R" = "null" ]; then
+              echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Sin Instance Refresh: creacion inicial del grupo."
+              echo "- Instance Refresh: no aplica (creacion inicial)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            ST=$(echo "$R" | jq -r '.StartTime')
+            if [ "$(date -u -d "$ST" +%s)" -lt "$((INICIO_EPOCH - 30))" ]; then
+              echo "El ultimo Instance Refresh es anterior a este cambio: no hubo reemplazo."
+              echo "- Instance Refresh: no se inicio uno nuevo en este cambio" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            STATUS=$(echo "$R" | jq -r '.Status')
+            PCT=$(echo "$R" | jq -r '.PercentageComplete // 0')
+            ID=$(echo "$R" | jq -r '.InstanceRefreshId')
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) refresh=$ID estado=$STATUS avance=${PCT}%"
+            case "$STATUS" in
+              Successful)
+                echo "$R" > refresh.json
+                { echo "- Instance Refresh \`$ID\`: **Successful**"; echo "- Inicio: $ST | Fin (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"; } >> "$GITHUB_STEP_SUMMARY"
+                exit 0 ;;
+              Failed|Cancelled|RollbackSuccessful|RollbackFailed)
+                echo "$R" | tee refresh.json
+                echo "- Instance Refresh \`$ID\`: **$STATUS**" >> "$GITHUB_STEP_SUMMARY"
+                exit 1 ;;
+            esac
+            sleep 20
+          done
+          echo "Tiempo agotado esperando el Instance Refresh."
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: refresh
+          path: terraform/refresh.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   verificar:
     name: Verificacion independiente y plan posterior
@@ -162,37 +226,48 @@ jobs:
         run: terraform init -backend-config=backend.hcl -input=false
 
       - name: "A - Outputs de Terraform"
-        id: tf
         run: |
-          echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
-          echo "public_ip=$(terraform output -raw public_ip)" >> "$GITHUB_OUTPUT"
           terraform output
+          {
+            echo "ALB_DNS=$(terraform output -raw alb_dns_name)"
+            echo "TG_ARN=$(terraform output -raw target_group_arn)"
+            echo "ASG=$(terraform output -raw asg_name)"
+            echo "VERSION_ESPERADA=$(terraform output -raw portal_version)"
+            echo "BUILD_ESPERADO=$(terraform output -raw build_ref)"
+            echo "ALUMNO=$(terraform output -raw student)"
+          } >> "$GITHUB_ENV"
 
-      - name: "B - Consulta independiente a AWS (CLI)"
+      - name: "B - Consulta independiente a AWS (ASG, destinos y plantilla)"
         run: |
-          aws ec2 describe-instances \
-            --instance-ids "${{ steps.tf.outputs.instance_id }}" \
-            --query 'Reservations[0].Instances[0].{InstanceId:InstanceId,Estado:State.Name,Tipo:InstanceType,IPPublica:PublicIpAddress,IPPrivada:PrivateIpAddress}' \
-            --output table
+          echo "Hora UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ASG" \
+            --query 'AutoScalingGroups[0].Instances[].{Id:InstanceId,Zona:AvailabilityZone,Estado:LifecycleState,Salud:HealthStatus,Plantilla:LaunchTemplate.Version}' --output table
+          aws elbv2 describe-target-health --target-group-arn "$TG_ARN" \
+            --query 'TargetHealthDescriptions[].{Id:Target.Id,Estado:TargetHealth.State}' --output table
+          HEALTHY=$(aws elbv2 describe-target-health --target-group-arn "$TG_ARN" --query "length(TargetHealthDescriptions[?TargetHealth.State=='healthy'])" --output text)
+          echo "Destinos saludables: $HEALTHY"
+          [ "$HEALTHY" -ge 2 ]
 
-      - name: "C - Prueba HTTP al portal"
+      - name: "C - Prueba HTTP/funcional al Portal detras del ALB"
         run: |
-          IP="${{ steps.tf.outputs.public_ip }}"
-          ID="${{ steps.tf.outputs.instance_id }}"
           CODE=""
           for i in $(seq 1 30); do
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$IP/" || true)
-            echo "intento $i -> HTTP $CODE"
-            if [ "$CODE" = "200" ]; then break; fi
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ALB_DNS/api/check" || true)
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) intento $i -> HTTP $CODE"
+            [ "$CODE" = "200" ] && break
             sleep 10
           done
           [ "$CODE" = "200" ]
-          echo "health.txt -> $(curl -s --max-time 5 "http://$IP/health.txt")"
-          curl -s --max-time 5 "http://$IP/" | grep -q "$ID"
-          echo "La pagina muestra el mismo Instance ID: $ID"
+          INFO=$(curl -s --max-time 5 "http://$ALB_DNS/api/info")
+          echo "$INFO" | jq '{provider, version, student, course, x, build_ref, resource_id, location, private_ip, artifact_sha256, observed_at_utc}'
+          [ "$(echo "$INFO" | jq -r .version)" = "$VERSION_ESPERADA" ]
+          [ "$(echo "$INFO" | jq -r .build_ref)" = "$BUILD_ESPERADO" ]
+          [ "$(echo "$INFO" | jq -r .student)" = "$ALUMNO" ]
+          [ "$(echo "$INFO" | jq -r .provider)" = "aws" ]
+          echo "Identidad, version y build coinciden con el codigo."
 
       - name: "D - Plan posterior (debe indicar 0 cambios)"
-        run: terraform plan -var-file=fase1.tfvars -input=false -detailed-exitcode
+        run: terraform plan -var-file=u2.tfvars -input=false -detailed-exitcode
 
   destroy:
     name: Destroy (con aprobacion manual)
@@ -216,18 +291,25 @@ jobs:
       - name: "terraform init (backend remoto S3)"
         run: terraform init -backend-config=backend.hcl -input=false
 
+      - name: "Registrar hora UTC del retiro"
+        run: echo "Inicio del destroy (UTC) $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
       - name: "terraform destroy"
-        run: terraform destroy -auto-approve -input=false -var-file=fase1.tfvars
+        run: terraform destroy -auto-approve -input=false -var-file=u2.tfvars
 
       - name: "Verificacion independiente de limpieza (AWS CLI)"
         run: |
-          N=$(grep -E '^student_number' fase1.tfvars | sed -E 's/[^0-9]*([0-9]+).*/\1/')
-          INST=$(aws ec2 describe-instances \
-            --filters "Name=tag:StudentNumber,Values=$N" "Name=tag:Project,Values=NexoAndes" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-            --query 'Reservations[].Instances[].InstanceId' --output text)
-          VPCS=$(aws ec2 describe-vpcs \
-            --filters "Name=tag:StudentNumber,Values=$N" "Name=tag:Project,Values=NexoAndes" \
-            --query 'Vpcs[].VpcId' --output text)
+          A=$(grep -E '^x[[:space:]]*=' u2.tfvars | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          S=$(printf 'a%03d' "$A")
+          echo "Hora UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ) | alumno=$S"
+          INST=$(aws ec2 describe-instances --filters "Name=tag:alumno,Values=$S" "Name=tag:proyecto,Values=NexoAndes" "Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down" --query 'Reservations[].Instances[].InstanceId' --output text)
+          VPCS=$(aws ec2 describe-vpcs --filters "Name=tag:alumno,Values=$S" "Name=tag:proyecto,Values=NexoAndes" --query 'Vpcs[].VpcId' --output text)
+          ASGS=$(aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?contains(AutoScalingGroupName, 'na-u2-') && contains(AutoScalingGroupName, '$S')].AutoScalingGroupName" --output text)
+          ALBS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, '$S')].LoadBalancerName" --output text)
+          LTS=$(aws ec2 describe-launch-templates --filters "Name=tag:alumno,Values=$S" --query 'LaunchTemplates[].LaunchTemplateName' --output text)
           echo "Instancias restantes: [$INST]"
           echo "VPC restantes: [$VPCS]"
-          [ -z "$INST" ] && [ -z "$VPCS" ]
+          echo "ASG restantes: [$ASGS]"
+          echo "ALB restantes: [$ALBS]"
+          echo "Launch Templates restantes: [$LTS]"
+          [ -z "$INST" ] && [ -z "$VPCS" ] && [ -z "$ASGS" ] && [ -z "$ALBS" ] && [ -z "$LTS" ]
