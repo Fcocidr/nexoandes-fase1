@@ -1,0 +1,6 @@
+# La plantilla del Portal exige saltos de linea LF
+*.tpl  text eol=lf
+*.sh   text eol=lf
+*.tf   text eol=lf
+*.hcl  text eol=lf
+*.yml  text eol=lf

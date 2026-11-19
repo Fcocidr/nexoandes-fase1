@@ -5,18 +5,18 @@ variable "name_prefix" {
 
 variable "vpc_id" {
   type        = string
-  description = "ID de la VPC donde se crea el Security Group."
+  description = "ID de la VPC donde se crean los Security Groups."
 }
 
 variable "http_port" {
   type        = number
-  description = "Puerto HTTP que se publica."
+  description = "Puerto HTTP del Portal."
   default     = 80
 }
 
 variable "allowed_cidr" {
   type        = string
-  description = "Origen permitido para el ingreso HTTP."
+  description = "Origen permitido para el ingreso HTTP al ALB."
   default     = "0.0.0.0/0"
 }
 

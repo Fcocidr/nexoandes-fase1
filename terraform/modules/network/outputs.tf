@@ -3,9 +3,9 @@ output "vpc_id" {
   value       = aws_vpc.this.id
 }
 
-output "subnet_id" {
-  description = "ID de la subred publica."
-  value       = aws_subnet.public.id
+output "subnet_ids" {
+  description = "IDs de las subredes publicas, en orden A y B."
+  value       = [for k in sort(keys(aws_subnet.public)) : aws_subnet.public[k].id]
 }
 
 output "internet_gateway_id" {

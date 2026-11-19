@@ -5,3 +5,6 @@ AVD-AWS-0107
 AVD-AWS-0104
 # IP publica en la subnet publica: requisito del diagrama (map_public_ip_on_launch = true)
 AVD-AWS-0164
+# U2: el ALB es internet-facing y publica HTTP/80 segun el diagrama del docente
+AVD-AWS-0053
+AVD-AWS-0054

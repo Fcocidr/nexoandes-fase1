@@ -14,10 +14,10 @@ override.tf.json
 .terraformrc
 terraform.rc
 
-# Variables locales. fase1.tfvars SI se versiona: solo contiene valores de identificacion, sin secretos
+# Variables locales. u2.tfvars SI se versiona: solo contiene valores de identificacion, sin secretos
 *.tfvars
 *.tfvars.json
-!terraform/fase1.tfvars
+!terraform/u2.tfvars
 
 # Credenciales y secretos
 *.pem
