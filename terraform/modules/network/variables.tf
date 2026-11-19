@@ -5,12 +5,15 @@ variable "name_prefix" {
 
 variable "vpc_cidr" {
   type        = string
-  description = "Bloque CIDR de la VPC."
+  description = "Bloque CIDR de la VPC (10.X.0.0/16)."
 }
 
-variable "subnet_cidr" {
-  type        = string
-  description = "Bloque CIDR de la subred publica."
+variable "subnets" {
+  type = map(object({
+    cidr = string
+    az   = string
+  }))
+  description = "Subredes publicas por clave (a, b) con su CIDR y zona de disponibilidad."
 }
 
 variable "tags" {
