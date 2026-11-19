@@ -1,19 +1,19 @@
-output "instance_id" {
-  description = "ID de la instancia EC2."
-  value       = aws_instance.portal.id
+output "launch_template_id" {
+  description = "ID de la Launch Template."
+  value       = aws_launch_template.portal.id
 }
 
-output "public_ip" {
-  description = "IP publica de la instancia."
-  value       = aws_instance.portal.public_ip
+output "launch_template_version" {
+  description = "Version numerada de la Launch Template usada por el ASG."
+  value       = aws_launch_template.portal.latest_version
 }
 
-output "private_ip" {
-  description = "IP privada de la instancia."
-  value       = aws_instance.portal.private_ip
+output "asg_name" {
+  description = "Nombre del Auto Scaling Group."
+  value       = aws_autoscaling_group.portal.name
 }
 
 output "imds_http_tokens" {
-  description = "Modo de tokens de IMDS configurado (required = IMDSv2)."
-  value       = aws_instance.portal.metadata_options[0].http_tokens
+  description = "Modo de tokens de IMDS (required = IMDSv2)."
+  value       = aws_launch_template.portal.metadata_options[0].http_tokens
 }

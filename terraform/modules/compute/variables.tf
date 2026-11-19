@@ -3,14 +3,9 @@ variable "name_prefix" {
   description = "Prefijo comun para los nombres de los recursos."
 }
 
-variable "subnet_id" {
+variable "ami_id" {
   type        = string
-  description = "ID de la subred donde se lanza la instancia."
-}
-
-variable "security_group_ids" {
-  type        = list(string)
-  description = "IDs de los Security Groups asociados a la instancia."
+  description = "ID fijo de la AMI."
 }
 
 variable "instance_type" {
@@ -20,7 +15,38 @@ variable "instance_type" {
 
 variable "user_data" {
   type        = string
-  description = "Contenido ya renderizado del user data del Portal Operacional."
+  description = "Bootstrap ya renderizado del Portal (sin codificar)."
+}
+
+variable "security_group_id" {
+  type        = string
+  description = "Security Group de las instancias."
+}
+
+variable "subnet_ids" {
+  type        = list(string)
+  description = "Subredes A y B donde se lanzan las instancias."
+}
+
+variable "target_group_arn" {
+  type        = string
+  description = "Target Group del ALB que recibe las instancias."
+}
+
+variable "desired_capacity" {
+  type        = number
+  description = "Capacidad base fija (instancias en servicio)."
+}
+
+variable "max_capacity" {
+  type        = number
+  description = "Limite de capacidad que admite la capacidad temporal del reemplazo."
+}
+
+variable "health_check_grace_period" {
+  type        = number
+  description = "Segundos de gracia para que el bootstrap termine antes de evaluar la salud."
+  default     = 180
 }
 
 variable "tags" {
